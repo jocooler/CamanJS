@@ -8,6 +8,9 @@ if exports?
 
   fs = require 'fs'
   http = require 'http'
+# Worker compatibility
+else if !document?
+  Root = self
 else
   Root = window
 
@@ -26,8 +29,8 @@ else
 class Caman extends Module
   # The current version.
   @version:
-    release: "4.1.2"
-    date: "7/27/2013"
+    release: "4.1.2-worker"
+    date: "10/24/2015"
 
   # @property [Boolean] Debug mode enables console logging.
   @DEBUG: false
@@ -49,8 +52,11 @@ class Caman extends Module
   # @property [Boolean] Are we in a NodeJS environment?
   @NodeJS: exports?
 
+  # @property [Boolean] Are we in a webworker?
+  @Worker: !document?
+  
   # @property [Boolean] Should we check the DOM for images with Caman instructions?
-  @autoload: not Caman.NodeJS
+  @autoload: not Caman.NodeJS and not Caman.Worker
 
   # Custom toString()
   # @return [String] Version and release information.
@@ -61,7 +67,7 @@ class Caman extends Module
   # @param [DOMObject] canvas The canvas to inspect.
   # @return [String] The Caman ID associated with this canvas.
   @getAttrId: (canvas) ->
-    return true if Caman.NodeJS
+    return true if Caman.NodeJS or Caman.Worker
 
     if typeof canvas is "string"
       canvas = $(canvas)
@@ -98,6 +104,13 @@ class Caman extends Module
   #   @param [String, File] file File object or path to image to read.
   #   @param [Function] callback Function to call once initialization completes.
   # 
+  # @overload Caman(pixelData, callback, width, height)
+  #   **WebWorker**: Initialize Caman with pixeldata from a canvas, a callback, and the width and height of the original image.
+  #   @param [UInt8ClampedArray] pixel data created in the renderingContext('2d')
+  #   @param [Function] callback Function to call once initialization completes.
+  #   @param [Int] the width of the original image in pixels.
+  #   @param [Int] the height of the original image in pixels.
+  #
   # @return [Caman] Initialized Caman instance.
   constructor: ->
     throw "Invalid arguments" if arguments.length is 0
@@ -112,7 +125,7 @@ class Caman extends Module
 
       args = arguments[0]
 
-      unless Caman.NodeJS
+      unless Caman.NodeJS or Caman.Worker
         id = parseInt Caman.getAttrId(args[0]), 10
         callback = if typeof args[1] is "function"
           args[1]
@@ -156,7 +169,7 @@ class Caman extends Module
   # 
   # @param [Function] cb The callback function to fire when the DOM is ready.
   domIsLoaded: (cb) ->
-    if Caman.NodeJS
+    if Caman.NodeJS or Caman.Worker
       setTimeout =>
         cb.call(@)
       , 0
@@ -187,7 +200,7 @@ class Caman extends Module
     @imageUrl = null
     @callback = ->
 
-    # First argument is always our canvas/image
+    # First argument is always our canvas/image/imageData
     @setInitObject args[0]
     return if args.length is 1
     
@@ -200,7 +213,12 @@ class Caman extends Module
     @callback = args[2]
 
     if args.length is 4
-      @options[key] = val for own key, val of args[4]
+      if !Caman.Worker
+        @options[key] = val for own key, val of args[4]
+      else 
+        @callback = args[1]
+        @width = args[2]
+        @height = args[3]
 
   # Sets the initialization object for this instance.
   #
@@ -210,7 +228,10 @@ class Caman extends Module
       @initObj = obj
       @initType = 'node'
       return
-
+    if Caman.Worker
+      @initObj = obj
+      @initType = 'worker'
+      return
     if typeof obj is "object"
       @initObj = obj
     else
@@ -225,6 +246,7 @@ class Caman extends Module
   setup: ->
     switch @initType
       when "node" then @initNode()
+      when "worker" then @initWorker()
       when "img" then @initImage()
       when "canvas" then @initCanvas()
 
@@ -288,6 +310,9 @@ class Caman extends Module
       @waitForImageLoaded()
     else
       @finishInit()
+      
+  initWorker: ->
+    @finishInit();
 
   # Automatically check for a HiDPI capable screen and swap out the image if possible.
   # Also checks the image URL to see if it's a cross-domain request, and attempt to
@@ -346,10 +371,14 @@ class Caman extends Module
   # Final step of initialization. We finish setting up our canvas element, and we
   # draw the image to the canvas (if applicable).
   finishInit: ->
-    @context = @canvas.getContext '2d' unless @context?
-
-    @originalWidth = @preScaledWidth = @width = @canvas.width
-    @originalHeight = @preScaledHeight = @height = @canvas.height
+    if !Caman.Worker
+      @context = @canvas.getContext '2d' unless @context?
+      
+      @originalWidth = @preScaledWidth = @width = @canvas.width
+      @originalHeight = @preScaledHeight = @height = @canvas.height
+    else
+      @originalWidth = @preScaledWidth = @width
+      @originalHeight = @preScaledHeight = @height
 
     @hiDPIAdjustments()
     @assignId() unless @hasId()
@@ -361,8 +390,11 @@ class Caman extends Module
         0, 0, 
         @preScaledWidth, @preScaledHeight
     
-    @imageData = @context.getImageData 0, 0, @canvas.width, @canvas.height
-    @pixelData = @imageData.data
+    if Caman.Worker
+      @pixelData = @imageData = @initObj
+    else
+      @imageData = @context.getImageData 0, 0, @canvas.width, @canvas.height
+      @pixelData = @imageData.data
     
     if Caman.allowRevert
       @initializedPixelData = Util.dataArray(@pixelData.length)
@@ -372,9 +404,14 @@ class Caman extends Module
         @initializedPixelData[i] = pixel
         @originalPixelData[i] = pixel
 
-    @dimensions =
-      width: @canvas.width
-      height: @canvas.height
+    if Caman.Worker
+      @dimensions =
+        width: @width
+        height: @height
+    else
+      @dimensions =
+        width: @canvas.width
+        height: @canvas.height
 
     Store.put @id, @ unless Caman.NodeJS
 
@@ -404,7 +441,7 @@ class Caman extends Module
 
   # Assign a unique ID to this instance.
   assignId: ->
-    return if Caman.NodeJS or @canvas.getAttribute 'data-caman-id'
+    return if Caman.NodeJS or Caman.Worker or @canvas.getAttribute 'data-caman-id'
     @canvas.setAttribute 'data-caman-id', @id
 
   # Is HiDPI support disabled via the HTML data attribute?
@@ -415,7 +452,7 @@ class Caman extends Module
   # Perform HiDPI adjustments to the canvas. This consists of changing the
   # scaling and the dimensions to match that of the display.
   hiDPIAdjustments: ->
-    return if Caman.NodeJS or !@needsHiDPISwap()
+    return if Caman.NodeJS or Caman.Worker or !@needsHiDPISwap()
 
     ratio = @hiDPIRatio()
 
@@ -494,7 +531,12 @@ class Caman extends Module
     Event.trigger @, "renderStart"
     
     @renderer.execute =>
-      @context.putImageData @imageData, 0, 0
+      unless Caman.Worker
+        @context.putImageData @imageData, 0, 0
+      else 
+        # exposeImageData is an external function that can be called to store the image data or process it further.
+        # Implementations will need to write exposeImageData themselves.
+        exposeImageData(@imageData, @width, @height)
       callback.call @
 
   # Reverts the canvas back to it's original state while
@@ -511,24 +553,27 @@ class Caman extends Module
   # Completely resets the canvas back to it's original state.
   # Any size adjustments will also be reset.
   reset: ->
-    canvas = document.createElement('canvas')
-    Util.copyAttributes(@canvas, canvas)
+    if Caman.Worker
+      console.log("Revert does not work in a Worker.")
+    else
+      canvas = document.createElement('canvas')
+      Util.copyAttributes(@canvas, canvas)
 
-    canvas.width = @originalWidth
-    canvas.height = @originalHeight
+      canvas.width = @originalWidth
+      canvas.height = @originalHeight
 
-    ctx = canvas.getContext('2d')
-    imageData = ctx.getImageData 0, 0, canvas.width, canvas.height
-    pixelData = imageData.data
+      ctx = canvas.getContext('2d')
+      imageData = ctx.getImageData 0, 0, canvas.width, canvas.height
+      pixelData = imageData.data
 
-    pixelData[i] = pixel for pixel, i in @initializedPixelData
+      pixelData[i] = pixel for pixel, i in @initializedPixelData
 
-    ctx.putImageData imageData, 0, 0
+      ctx.putImageData imageData, 0, 0
 
-    @cropCoordinates = x: 0, y: 0
-    @resized = false
+      @cropCoordinates = x: 0, y: 0
+      @resized = false
 
-    @replaceCanvas(canvas)
+      @replaceCanvas(canvas)
 
   # Returns the original pixel data while maintaining any
   # cropping or resizing that may have occured.

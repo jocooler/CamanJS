@@ -37,5 +37,5 @@ class Util
 
   # Support for browsers that don't know Uint8Array (such as IE9)
   @dataArray: (length = 0) ->
-    return new Uint8Array(length) if Caman.NodeJS or window.Uint8Array?
+    return new Uint8Array(length) if Caman.NodeJS or Root.Uint8Array?
     return new Array(length)
